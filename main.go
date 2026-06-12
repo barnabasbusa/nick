@@ -83,6 +83,30 @@ var (
 		Validator:   checkHex,
 	}
 
+	gpuFlag = &cli.BoolFlag{
+		Name:  "gpu",
+		Usage: "use GPU acceleration (OpenCL or CUDA) for the search",
+	}
+	gpuBackendFlag = &cli.StringFlag{
+		Name:  "gpu-backend",
+		Usage: "GPU backend: opencl, cuda, or auto",
+		Value: "opencl",
+	}
+	gpuDeviceFlag = &cli.IntFlag{
+		Name:  "gpu-device",
+		Usage: "GPU device index to use",
+		Value: 0,
+	}
+	gpuDevicesFlag = &cli.StringFlag{
+		Name:  "gpu-devices",
+		Usage: "CUDA multi-GPU: comma-separated device indices or 'all'",
+	}
+	batchSizeFlag = &cli.IntFlag{
+		Name:  "batch-size",
+		Usage: "number of candidates per GPU batch",
+		Value: 1048576,
+	}
+
 	app = &cli.Command{
 		Name:  "nick",
 		Usage: "a vanity address searcher for deployments using nick's method",
@@ -91,21 +115,29 @@ var (
 				Name:  "search",
 				Usage: "Search for a vanity address to deploy a contract using nicks method.",
 				Flags: []cli.Flag{threadsFlag, scoreFlag, prefixFlag, suffixFlag,
-					initcodeFlag, gasLimitFlag, gasPriceFlag, sigRFlag},
+					initcodeFlag, gasLimitFlag, gasPriceFlag, sigRFlag,
+					gpuFlag, gpuBackendFlag, gpuDeviceFlag, gpuDevicesFlag, batchSizeFlag},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					f := task{
-						prefix:    common.FromHex(cmd.String(prefixFlag.Name)),
-						suffix:    common.FromHex(cmd.String(suffixFlag.Name)),
-						initcode:  common.FromHex(cmd.String(initcodeFlag.Name)),
-						sigR:      new(big.Int).SetBytes(common.FromHex(cmd.String(sigRFlag.Name))),
-						sigS:      big.NewInt(0x1337),
-						gasLimit:  cmd.Uint(gasLimitFlag.Name),
-						gasPrice:  cmd.Uint(gasPriceFlag.Name),
-						threads:   cmd.Int(threadsFlag.Name),
-						score:     int(cmd.Int(scoreFlag.Name)),
-						highscore: &atomic.Uint64{},
-						count:     &atomic.Uint64{},
-						quit:      make(chan struct{}),
+						prefix:     common.FromHex(cmd.String(prefixFlag.Name)),
+						suffix:     common.FromHex(cmd.String(suffixFlag.Name)),
+						initcode:   common.FromHex(cmd.String(initcodeFlag.Name)),
+						sigR:       new(big.Int).SetBytes(common.FromHex(cmd.String(sigRFlag.Name))),
+						sigS:       big.NewInt(0x1337),
+						gasLimit:   cmd.Uint(gasLimitFlag.Name),
+						gasPrice:   cmd.Uint(gasPriceFlag.Name),
+						threads:    cmd.Int(threadsFlag.Name),
+						score:      int(cmd.Int(scoreFlag.Name)),
+						gpuBackend: cmd.String(gpuBackendFlag.Name),
+						gpuDevice:  int(cmd.Int(gpuDeviceFlag.Name)),
+						gpuDevices: cmd.String(gpuDevicesFlag.Name),
+						batchSize:  int(cmd.Int(batchSizeFlag.Name)),
+						highscore:  &atomic.Uint64{},
+						count:      &atomic.Uint64{},
+						quit:       make(chan struct{}),
+					}
+					if cmd.Bool(gpuFlag.Name) {
+						return f.runGPU()
 					}
 					return f.run()
 				},
@@ -131,6 +163,14 @@ var (
 				ArgsUsage: "[filename]",
 				Action:    print,
 			},
+			{
+				Name:  "list-gpus",
+				Usage: "List available GPU devices for the given backend.",
+				Flags: []cli.Flag{gpuBackendFlag, gpuDevicesFlag},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return listGPUs(cmd.String(gpuBackendFlag.Name), cmd.String(gpuDevicesFlag.Name))
+				},
+			},
 		},
 	}
 )
@@ -155,6 +195,11 @@ type task struct {
 
 	threads int64
 	score   int
+
+	gpuBackend string
+	gpuDevice  int
+	gpuDevices string
+	batchSize  int
 
 	highscore *atomic.Uint64
 	count     *atomic.Uint64

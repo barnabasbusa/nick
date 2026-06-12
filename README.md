@@ -48,4 +48,49 @@ OPTIONS:
    --help, -h        show help (default: false)
 ```
 
+## GPU acceleration
+
+The search can be offloaded to a GPU (OpenCL or CUDA). The bottleneck in Nick's
+method is the per-candidate `ecrecover`; the GPU kernel implements secp256k1
+public-key recovery and both Keccak hashes on-device.
+
+Because only the signature `s` varies during a search (`r`, `v`, and the sighash
+are fixed), recovery collapses to `Q = Q_base + k·D` with a constant point
+`D = r⁻¹·R`. The host precomputes `Q_base` and a comb table for `D`; candidate
+`k` corresponds to signature `s = sigS + k`, and the kernel only adds `k·D`,
+hashes, and matches the pattern. The winning candidate's full transaction is
+reconstructed and re-verified on the CPU before printing.
+
+### Build
+
+```
+make build        # CPU only (no GPU libraries required)
+make build-gpu    # OpenCL  (needs: opencl-headers ocl-icd-opencl-dev; NVIDIA: nvidia-opencl-dev)
+make build-cuda   # CUDA + OpenCL (needs the CUDA Toolkit with nvcc, plus libOpenCL)
+```
+
+### Run
+
+```
+nick list-gpus                          # OpenCL devices
+nick list-gpus --gpu-backend cuda       # CUDA devices
+
+# OpenCL on device 0
+nick search --gpu --initcode 0x60425000 --suffix 0xaaaa
+
+# CUDA across all GPUs
+nick search --gpu --gpu-backend cuda --gpu-devices all --initcode 0x60425000 --suffix 0xaaaa
+```
+
+Extra `search` flags: `--gpu`, `--gpu-backend {opencl|cuda|auto}`,
+`--gpu-device <i>`, `--gpu-devices <list|all>` (CUDA multi-GPU),
+`--batch-size <n>`. A match requires the full `--prefix` and `--suffix` to match
+(the per-nibble scoring of the CPU path is a search heuristic, not a GPU stop
+condition).
+
+> Note: GPU mining of Nick's method is far heavier per candidate than CREATE2
+> mining (one scalar-point accumulation, a field inversion and two Keccak hashes
+> each), so absolute hashrate is lower than a pure-Keccak miner — but still much
+> faster than CPU `ecrecover`.
+
 [nm]: https://yamenmerhi.medium.com/nicks-method-ethereum-keyless-execution-168a6659479c
