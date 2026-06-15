@@ -19,6 +19,14 @@ import "time"
 // modular inverse better but use more per-thread local memory.
 const KernelIters = 64
 
+// MetalKernelIters is the per-thread run length for the Apple Silicon (Metal)
+// backend. It is independent of KernelIters because the Metal kernel has its own
+// occupancy/local-memory tradeoff: on Apple GPUs a longer run amortizes the
+// batched field inversion much better (≈35% higher throughput at 256 vs 64 on an
+// M5 Max), and the comb table caps it at 256 (window 0 holds i*D for i<256). The
+// host injects this as NICK_ITERS into the shader and uses it for grid math.
+const MetalKernelIters = 256
+
 // GPUInfo describes an available GPU device.
 type GPUInfo struct {
 	Index        int

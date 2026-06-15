@@ -138,19 +138,31 @@ func (t *task) makeMiner() (gpuRunner, int, string, error) {
 		}
 		return gm, gm.BatchSize() * miner.KernelIters, gm.DeviceName(), nil
 	}
+	tryMetal := func() (gpuRunner, int, string, error) {
+		mm, err := miner.NewMetalMiner(t.gpuDevice, t.batchSize)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		return mm, mm.BatchSize() * miner.MetalKernelIters, mm.DeviceName(), nil
+	}
 
 	switch strings.ToLower(t.gpuBackend) {
 	case "cuda":
 		return tryCUDA()
+	case "metal":
+		return tryMetal()
 	case "opencl", "":
 		return tryOpenCL()
 	case "auto":
+		if r, b, n, err := tryMetal(); err == nil {
+			return r, b, n, nil
+		}
 		if r, b, n, err := tryCUDA(); err == nil {
 			return r, b, n, nil
 		}
 		return tryOpenCL()
 	default:
-		return nil, 0, "", fmt.Errorf("unknown gpu-backend %q (use opencl, cuda, or auto)", t.gpuBackend)
+		return nil, 0, "", fmt.Errorf("unknown gpu-backend %q (use opencl, cuda, metal, or auto)", t.gpuBackend)
 	}
 }
 
@@ -202,6 +214,17 @@ func listGPUs(backend, devices string) error {
 		for _, g := range gpus {
 			fmt.Printf("  [%d] %s — %d SMs, %.1f GB\n",
 				g.Index, g.Name, g.ComputeUnits, float64(g.TotalMemory)/1e9)
+		}
+		return nil
+	}
+	if strings.EqualFold(backend, "metal") {
+		gpus, err := miner.ListMetalGPUs()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Metal devices (%d):\n", len(gpus))
+		for _, g := range gpus {
+			fmt.Printf("  [%d] %s (%s)\n", g.Index, g.Name, g.Vendor)
 		}
 		return nil
 	}

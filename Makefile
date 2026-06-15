@@ -1,4 +1,4 @@
-.PHONY: build build-gpu build-cuda-lib build-cuda clean test list-gpus help
+.PHONY: build build-gpu build-metal build-cuda-lib build-cuda clean test list-gpus help
 
 BINARY_NAME=nick
 GOBUILD=go build
@@ -31,6 +31,11 @@ build:
 build-gpu:
 	@echo "Building with OpenCL support..."
 	CGO_ENABLED=1 $(GOBUILD) -o $(BINARY_NAME) -v
+
+## build-metal: Build with Apple Silicon GPU (Metal) support (macOS, no Xcode needed)
+build-metal:
+	@echo "Building with Metal support (Apple Silicon)..."
+	CGO_ENABLED=1 $(GOBUILD) -tags "metal nocl" -o $(BINARY_NAME) -v
 
 ## build-cuda-lib: Compile the CUDA kernel library (required before build-cuda)
 build-cuda-lib:
