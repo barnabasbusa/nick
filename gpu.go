@@ -123,20 +123,20 @@ func (t *task) makeMiner() (gpuRunner, int, string, error) {
 			if err != nil {
 				return nil, 0, "", err
 			}
-			return mm, mm.TotalBatchSize(), strings.Join(mm.DeviceNames(), ", "), nil
+			return mm, mm.TotalBatchSize() * miner.KernelIters, strings.Join(mm.DeviceNames(), ", "), nil
 		}
 		cm, err := miner.NewCUDAMiner(ids[0], t.batchSize)
 		if err != nil {
 			return nil, 0, "", err
 		}
-		return cm, cm.BatchSize(), cm.DeviceName(), nil
+		return cm, cm.BatchSize() * miner.KernelIters, cm.DeviceName(), nil
 	}
 	tryOpenCL := func() (gpuRunner, int, string, error) {
 		gm, err := miner.NewGPUMiner(t.gpuDevice, t.batchSize)
 		if err != nil {
 			return nil, 0, "", err
 		}
-		return gm, gm.BatchSize(), gm.DeviceName(), nil
+		return gm, gm.BatchSize() * miner.KernelIters, gm.DeviceName(), nil
 	}
 
 	switch strings.ToLower(t.gpuBackend) {

@@ -88,9 +88,35 @@ Extra `search` flags: `--gpu`, `--gpu-backend {opencl|cuda|auto}`,
 (the per-nibble scoring of the CPU path is a search heuristic, not a GPU stop
 condition).
 
-> Note: GPU mining of Nick's method is far heavier per candidate than CREATE2
-> mining (one scalar-point accumulation, a field inversion and two Keccak hashes
-> each), so absolute hashrate is lower than a pure-Keccak miner — but still much
-> faster than CPU `ecrecover`.
+### Performance & tuning
+
+Each GPU thread processes a run of `NICK_ITERS` consecutive candidates in affine
+coordinates. The pubkeys are `P_i = P0 + i·D`, and `i·D` is already in the comb
+table, so each `P_i` is a single affine point addition; the per-point inversions
+are all folded into one batched modular inversion (Montgomery's trick) for the
+whole run. This is the profanity-style approach and keeps the points hash-ready
+with no Jacobian→affine conversion per candidate. Field squaring uses a dedicated
+Comba routine (~10 muls vs 16 for a generic multiply).
+
+The main tuning knob is the run length:
+
+- **`NICK_ITERS`** (default 64) — larger amortizes the inverse better but uses
+  more per-thread local memory, lowering occupancy. It must match on both sides:
+  `miner.KernelIters` (Go) and the kernel. OpenCL takes it automatically; for
+  CUDA pass it to the build, e.g. `make build-cuda NICK_ITERS=32`. Benchmark
+  16 / 32 / 64 / 128 on your card.
+- **`--batch-size`** — threads per launch. Total candidates per launch is
+  `batch-size × NICK_ITERS`; lower it if you see UI lag or kernel timeouts on a
+  GPU that also drives a display.
+- **CUDA build knobs** (override on the `make build-cuda` line):
+  `NICK_BLOCK` (threads/block, e.g. 64/128/256), `MAXREG` (cap registers/thread
+  to raise occupancy, e.g. 96/128), and `CUDA_ARCH` (use `sm_86` for an RTX 3090,
+  `sm_89` for 40-series). The OpenCL local size (64) lives in `miner/gpu_opencl.go`.
+  Example: `make build-cuda CUDA_ARCH=sm_86 NICK_ITERS=64 NICK_BLOCK=128 MAXREG=128`.
+
+> Note: Nick's method is heavier per candidate than CREATE2 mining (a point
+> accumulation + an amortized field inversion + two Keccak hashes), so absolute
+> hashrate is lower than a pure-Keccak miner — but far faster than CPU
+> `ecrecover`.
 
 [nm]: https://yamenmerhi.medium.com/nicks-method-ethereum-keyless-execution-168a6659479c

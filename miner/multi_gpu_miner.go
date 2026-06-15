@@ -76,9 +76,10 @@ func (m *MultiGPUMiner) Mine(p *Precompute, prefix, suffix []byte, startNonce ui
 		go func(idx int, miner *CUDAMiner) {
 			defer wg.Done()
 
+			// Each device covers BatchSize()*KernelIters candidates per call.
 			gpuOffset := uint64(0)
 			for j := 0; j < idx; j++ {
-				gpuOffset += uint64(m.miners[j].BatchSize())
+				gpuOffset += uint64(m.miners[j].BatchSize()) * uint64(KernelIters)
 			}
 			res, _, err := miner.Mine(p, prefix, suffix, startNonce+gpuOffset)
 			if err != nil {

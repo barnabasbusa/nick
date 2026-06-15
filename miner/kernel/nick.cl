@@ -1,7 +1,8 @@
 /*
  * OpenCL entry kernel for Nick's-method vanity mining.
  * nick_lib.cl is prepended by the host (passed as a separate program source
- * string), so all device helpers are already declared here.
+ * string), so all device helpers are already declared here. Each work item
+ * processes NICK_ITERS consecutive candidates (see nick_mine_run).
  */
 
 __kernel void mine_nick(
@@ -13,11 +14,11 @@ __kernel void mine_nick(
     const int suffix_len,
     const u64 start_nonce,
     __global u8 *result_address,  /* 20 bytes */
-    __global u64 *result_nonce,    /* k of the winning candidate */
+    __global u64 *result_nonce,   /* k of the winning candidate */
     __global volatile int *found) {
     if (*found) return;
 
-    u64 k = start_nonce + (u64)get_global_id(0);
+    u64 base = start_nonce + (u64)get_global_id(0) * (u64)NICK_ITERS;
 
     u8 qb[64];
     for (int i = 0; i < 64; i++) qb[i] = q_base[i];
@@ -25,13 +26,6 @@ __kernel void mine_nick(
     for (int i = 0; i < prefix_len; i++) pfx[i] = prefix[i];
     for (int i = 0; i < suffix_len; i++) sfx[i] = suffix[i];
 
-    u8 addr[20];
-    nick_address_for_k(d_table, qb, k, addr);
-
-    if (nick_match(addr, pfx, prefix_len, sfx, suffix_len)) {
-        if (atomic_cmpxchg(found, 0, 1) == 0) {
-            for (int i = 0; i < 20; i++) result_address[i] = addr[i];
-            *result_nonce = k;
-        }
-    }
+    nick_mine_run(d_table, qb, base, pfx, prefix_len, sfx, suffix_len,
+                  result_address, result_nonce, found);
 }

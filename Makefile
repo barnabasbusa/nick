@@ -10,6 +10,16 @@ CUDA_PATH ?= /usr/local/cuda
 #   sm_70 Volta | sm_75 Turing | sm_80 Ampere | sm_89 Ada | sm_90 Hopper
 CUDA_ARCH ?= sm_80
 
+# Candidates per GPU thread (batch-inversion run length). MUST match
+# miner.KernelIters in the Go code.
+NICK_ITERS ?= 64
+
+# CUDA tuning knobs (override on the make command line):
+#   NICK_BLOCK - threads per block (e.g. 64/128/256)
+#   MAXREG     - cap registers/thread to raise occupancy (e.g. 64/96/128); empty = off
+NICK_BLOCK ?= 256
+MAXREG ?=
+
 all: build
 
 ## build: CPU-only build (no GPU libraries required)
@@ -30,6 +40,9 @@ endif
 	@echo "Compiling CUDA kernel library (arch=$(CUDA_ARCH))..."
 	cd miner/kernel && $(NVCC) -c -o nick_cuda.o cuda_launcher.cu \
 		-arch=$(CUDA_ARCH) \
+		-DNICK_ITERS=$(NICK_ITERS) \
+		-DNICK_BLOCK=$(NICK_BLOCK) \
+		$(if $(MAXREG),-maxrregcount=$(MAXREG)) \
 		-O3 \
 		--use_fast_math \
 		-Xcompiler -O3,-fPIC

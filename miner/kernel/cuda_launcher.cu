@@ -15,6 +15,11 @@
 /* comb table size: 8 windows * 256 entries * 64 bytes */
 #define NICK_TABLE_BYTES 131072
 
+/* threads per block (tunable: build with -DNICK_BLOCK=128 etc.) */
+#ifndef NICK_BLOCK
+#define NICK_BLOCK 256
+#endif
+
 /* Device info structure (must match the Go side) */
 typedef struct {
     int index;
@@ -152,7 +157,7 @@ int nick_cuda_mine(
 
     if (cudaMemset(ctx->d_found, 0, sizeof(int)) != cudaSuccess) return -1;
 
-    int block_size = 256;
+    int block_size = NICK_BLOCK;
     int num_blocks = (ctx->batch_size + block_size - 1) / block_size;
 
     mine_nick<<<num_blocks, block_size>>>(

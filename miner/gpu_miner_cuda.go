@@ -28,6 +28,7 @@ typedef struct NickCUDAContext NickCUDAContext;
 
 extern int get_cuda_device_count();
 extern int get_cuda_device_info(int index, CUDADeviceInfo* info);
+extern int nick_cuda_iters();
 extern NickCUDAContext* nick_cuda_init(int device_index, int batch_size);
 extern void nick_cuda_close(NickCUDAContext* ctx);
 extern int nick_cuda_set_table(NickCUDAContext* ctx, const unsigned char* table, int table_len);
@@ -93,6 +94,10 @@ func ListCUDAGPUs() ([]CUDAGPUInfo, error) {
 
 // NewCUDAMiner initializes a CUDA miner on the given device.
 func NewCUDAMiner(deviceIndex int, batchSize int) (*CUDAMiner, error) {
+	if iters := int(C.nick_cuda_iters()); iters != KernelIters {
+		return nil, fmt.Errorf("CUDA kernel built with NICK_ITERS=%d but host expects %d; rebuild with: make build-cuda NICK_ITERS=%d",
+			iters, KernelIters, KernelIters)
+	}
 	ctx := C.nick_cuda_init(C.int(deviceIndex), C.int(batchSize))
 	if ctx == nil {
 		return nil, fmt.Errorf("failed to initialize CUDA miner on device %d", deviceIndex)

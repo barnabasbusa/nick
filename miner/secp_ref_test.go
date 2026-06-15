@@ -184,7 +184,68 @@ func feMul(r, a, b *fe) {
 	feReduce(r, &t)
 }
 
-func feSqr(r, a *fe) { feMul(r, a, a) }
+// feSqr is dedicated Comba squaring: off-diagonal products a_i*a_j (i<j) are
+// added twice, diagonals once -> 10 multiplies instead of 16. Mirrors the C
+// fe_sqr in nick_lib.cl.
+func feSqr(r, a *fe) {
+	var t [8]uint64
+	var c0, c1, c2 uint64
+	acc := func(ph, pl uint64) {
+		var cr uint64
+		c0, cr = bits.Add64(c0, pl, 0)
+		c1, cr = bits.Add64(c1, ph, cr)
+		c2 += cr
+	}
+	// col 0: a0*a0
+	hi, lo := bits.Mul64(a[0], a[0])
+	acc(hi, lo)
+	t[0] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 1: 2*a0*a1
+	hi, lo = bits.Mul64(a[0], a[1])
+	acc(hi, lo)
+	acc(hi, lo)
+	t[1] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 2: 2*a0*a2 + a1*a1
+	hi, lo = bits.Mul64(a[0], a[2])
+	acc(hi, lo)
+	acc(hi, lo)
+	hi, lo = bits.Mul64(a[1], a[1])
+	acc(hi, lo)
+	t[2] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 3: 2*a0*a3 + 2*a1*a2
+	hi, lo = bits.Mul64(a[0], a[3])
+	acc(hi, lo)
+	acc(hi, lo)
+	hi, lo = bits.Mul64(a[1], a[2])
+	acc(hi, lo)
+	acc(hi, lo)
+	t[3] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 4: 2*a1*a3 + a2*a2
+	hi, lo = bits.Mul64(a[1], a[3])
+	acc(hi, lo)
+	acc(hi, lo)
+	hi, lo = bits.Mul64(a[2], a[2])
+	acc(hi, lo)
+	t[4] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 5: 2*a2*a3
+	hi, lo = bits.Mul64(a[2], a[3])
+	acc(hi, lo)
+	acc(hi, lo)
+	t[5] = c0
+	c0, c1, c2 = c1, c2, 0
+	// col 6: a3*a3
+	hi, lo = bits.Mul64(a[3], a[3])
+	acc(hi, lo)
+	t[6] = c0
+	c0 = c1
+	t[7] = c0
+	feReduce(r, &t)
+}
 
 func feInv(r, a *fe) {
 	// a^(p-2) mod p, LSB-first square-and-multiply.
@@ -298,8 +359,8 @@ func jacToAffine(p *jac) (x, y fe) {
 	return
 }
 
-// refPubForK reproduces the kernel: Q = Qbase + k*D using the comb table.
-func refPubForK(p *Precompute, k uint64) (x, y fe) {
+// refAccForK reproduces the kernel comb: the Jacobian point Qbase + k*D.
+func refAccForK(p *Precompute, k uint64) jac {
 	var acc jac // infinity
 	for w := 0; w < combWindows; w++ {
 		b := (k >> (8 * uint(w))) & 0xff
@@ -314,6 +375,12 @@ func refPubForK(p *Precompute, k uint64) (x, y fe) {
 	qbx := feFromBig(p.QBaseX)
 	qby := feFromBig(p.QBaseY)
 	pointAddMixed(&acc, &acc, &qbx, &qby)
+	return acc
+}
+
+// refPubForK reproduces the kernel: Q = Qbase + k*D using the comb table.
+func refPubForK(p *Precompute, k uint64) (x, y fe) {
+	acc := refAccForK(p, k)
 	return jacToAffine(&acc)
 }
 
@@ -398,6 +465,138 @@ func TestPointArithmeticVsCurve(t *testing.T) {
 		wx, wy = secpCurve.Add(bx, by, secpCurve.Params().Gx, secpCurve.Params().Gy)
 		if ax.toBig().Cmp(wx) != 0 || ay.toBig().Cmp(wy) != 0 {
 			t.Fatalf("mixed-add k=%d mismatch", k)
+		}
+	}
+}
+
+// TestMineRunMatchesEcrecover mirrors the optimized kernel exactly: incremental
+// point addition over a run of N candidates with a single batched (Montgomery)
+// inversion. Two FORWARD walks are used (deterministic => identical Jacobian
+// representations, so the batched 1/Z_i lines up with the point it converts).
+// Validates every candidate against Ecrecover.
+func TestMineRunMatchesEcrecover(t *testing.T) {
+	var z [32]byte
+	secpCurve.Params().Gx.FillBytes(z[:])
+	p, err := NewPrecompute(z[:], big.NewInt(0x0539), big.NewInt(0x1337))
+	if err != nil {
+		t.Fatalf("NewPrecompute: %v", err)
+	}
+
+	const N = 64
+	Dx, Dy := feFromBig(p.DX), feFromBig(p.DY)
+	base := uint64(0x9abc00)
+	P0 := refAccForK(p, base)
+
+	// walk 1 (forward): record Z_i and prefix products us[i] = Z_0*..*Z_{i-1}
+	zs := make([]fe, N)
+	us := make([]fe, N)
+	W := P0
+	acc := feOne
+	for i := 0; i < N; i++ {
+		zs[i] = W.Z
+		us[i] = acc
+		feMul(&acc, &acc, &W.Z)
+		pointAddMixed(&W, &W, &Dx, &Dy)
+	}
+	// one inverse for the whole run
+	var inv fe
+	feInv(&inv, &acc)
+	// field-only backward pass: zs[i] := 1/Z_i
+	for i := N - 1; i >= 0; i-- {
+		var zinv fe
+		feMul(&zinv, &inv, &us[i])
+		feMul(&inv, &inv, &zs[i])
+		zs[i] = zinv
+	}
+
+	// walk 2 (forward again from P0): identical reps, convert using zs[i]=1/Z_i
+	senders := make([][20]byte, N)
+	W = P0
+	for i := 0; i < N; i++ {
+		var zi2, zi3, ax, ay fe
+		feSqr(&zi2, &zs[i])
+		feMul(&zi3, &zi2, &zs[i])
+		feMul(&ax, &W.X, &zi2)
+		feMul(&ay, &W.Y, &zi3)
+		senders[i] = SenderFromPub(ax.toBig(), ay.toBig())
+		pointAddMixed(&W, &W, &Dx, &Dy)
+	}
+
+	for i := 0; i < N; i++ {
+		want := ecrecoverSender(t, z[:], p.R, new(big.Int).Add(p.SBase, new(big.Int).SetUint64(base+uint64(i))))
+		if senders[i] != want {
+			t.Fatalf("i=%d run sender %x != ecrecover %x", i, senders[i], want)
+		}
+	}
+}
+
+// TestAffineRunMatchesEcrecover mirrors the optimized affine kernel: compute P0
+// affine once, then each candidate i in [1,N) is P0 + i*D where i*D = table[0][i]
+// (the comb table window 0). The deltas (i*D).x - P0.x are batch-inverted, so
+// each point is a single affine addition. Validates every candidate vs Ecrecover.
+func TestAffineRunMatchesEcrecover(t *testing.T) {
+	var z [32]byte
+	secpCurve.Params().Gx.FillBytes(z[:])
+	p, err := NewPrecompute(z[:], big.NewInt(0x0539), big.NewInt(0x1337))
+	if err != nil {
+		t.Fatalf("NewPrecompute: %v", err)
+	}
+
+	const N = 64
+	base := uint64(0x9abc00)
+
+	// P0 affine
+	P0 := refAccForK(p, base)
+	px, py := jacToAffine(&P0)
+
+	// Mi = i*D = comb table[0][i]
+	readM := func(i int) (mx, my fe) {
+		off := (0*combEntries + i) * combEntryBytes
+		mx = feFromBig(feFromBytes(p.DTable[off : off+feBytes]))
+		my = feFromBig(feFromBytes(p.DTable[off+feBytes : off+combEntryBytes]))
+		return
+	}
+
+	m := N - 1
+	// One array only: store prefix products; recompute deltas in the backward
+	// pass (they are just table reads), halving per-thread local memory.
+	prefix := make([]fe, m)
+	acc := feOne
+	for j := 0; j < m; j++ {
+		mx, _ := readM(j + 1)
+		var delta fe
+		feSub(&delta, &mx, &px) // (i*D).x - P0.x
+		prefix[j] = acc
+		feMul(&acc, &acc, &delta)
+	}
+	var inv fe
+	feInv(&inv, &acc)
+
+	senders := make([][20]byte, N)
+	senders[0] = SenderFromPub(px.toBig(), py.toBig()) // candidate 0 = P0
+	for j := m - 1; j >= 0; j-- {
+		mx, my := readM(j + 1)
+		var delta, invj fe
+		feSub(&delta, &mx, &px)
+		feMul(&invj, &inv, &prefix[j]) // 1/delta_j
+		feMul(&inv, &inv, &delta)      // peel off delta_j
+
+		var lam, tt, xi, yi fe
+		feSub(&tt, &my, &py)
+		feMul(&lam, &tt, &invj) // λ = (my-py)/(mx-px)
+		feSqr(&tt, &lam)
+		feSub(&xi, &tt, &px)
+		feSub(&xi, &xi, &mx) // xi = λ² - px - mx
+		feSub(&tt, &px, &xi)
+		feMul(&yi, &lam, &tt)
+		feSub(&yi, &yi, &py) // yi = λ(px-xi) - py
+		senders[j+1] = SenderFromPub(xi.toBig(), yi.toBig())
+	}
+
+	for i := 0; i < N; i++ {
+		want := ecrecoverSender(t, z[:], p.R, new(big.Int).Add(p.SBase, new(big.Int).SetUint64(base+uint64(i))))
+		if senders[i] != want {
+			t.Fatalf("i=%d affine sender %x != ecrecover %x", i, senders[i], want)
 		}
 	}
 }

@@ -227,7 +227,9 @@ func NewGPUMiner(deviceIndex int, batchSize int) (*GPUMiner, error) {
 		m.Close()
 		return nil, fmt.Errorf("failed to create program: %s", C.GoString(C.cl_error_string(errCode)))
 	}
-	if ret := C.clBuildProgram(m.program, 1, &m.device, nil, nil, nil); ret != C.CL_SUCCESS {
+	buildOpts := C.CString(fmt.Sprintf("-D NICK_ITERS=%d", KernelIters))
+	defer C.free(unsafe.Pointer(buildOpts))
+	if ret := C.clBuildProgram(m.program, 1, &m.device, buildOpts, nil, nil); ret != C.CL_SUCCESS {
 		var logSize C.size_t
 		C.clGetProgramBuildInfo(m.program, m.device, C.CL_PROGRAM_BUILD_LOG, 0, nil, &logSize)
 		logBuf := make([]byte, logSize)

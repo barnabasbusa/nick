@@ -1,3 +1,4 @@
-miner/*.o
-miner/*.a
+miner/kernel/*.o
+miner/kernel/*.a
+temp/
 nick

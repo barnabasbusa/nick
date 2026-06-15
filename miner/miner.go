@@ -11,6 +11,14 @@ package miner
 
 import "time"
 
+// KernelIters is the number of consecutive candidates each GPU thread processes
+// in one run (the batch-inversion run length). It MUST match the kernels'
+// NICK_ITERS: the OpenCL build is given -D NICK_ITERS=KernelIters automatically,
+// and the CUDA build is checked against it at init (see gpu_miner_cuda.go); the
+// CUDA Makefile default and this value must agree. Larger values amortize the
+// modular inverse better but use more per-thread local memory.
+const KernelIters = 64
+
 // GPUInfo describes an available GPU device.
 type GPUInfo struct {
 	Index        int

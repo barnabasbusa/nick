@@ -16,6 +16,7 @@ typedef uchar u8;
 #define DEV inline
 #define GLOBAL __global
 #define MULHI(a, b) mul_hi((a), (b))
+#define ATOMIC_CAS(p, e, d) atomic_cmpxchg((p), (e), (d))
 #else
 /* CUDA: u64/u32/u8 avoid clashing with <sys/types.h>'s ulong/uint */
 typedef unsigned long long u64;
@@ -24,6 +25,16 @@ typedef unsigned int u32;
 #define DEV __device__ __forceinline__
 #define GLOBAL
 #define MULHI(a, b) __umul64hi((a), (b))
+/* OpenCL's atomic_cmpxchg needs a volatile pointer; CUDA's atomicCAS rejects
+ * one, so strip the qualifier here. */
+#define ATOMIC_CAS(p, e, d) atomicCAS((int *)(p), (e), (d))
+#endif
+
+/* Candidates processed per GPU thread (run length for batched inversion).
+ * The OpenCL host overrides this via a -D build option; keep the default in
+ * sync with miner.KernelIters and the CUDA build (Makefile NICK_ITERS). */
+#ifndef NICK_ITERS
+#define NICK_ITERS 64
 #endif
 
 #define SECP_C ((u64)0x1000003D1UL)
@@ -172,7 +183,33 @@ DEV void fe_mul(fe *r, const fe *a, const fe *b) {
     fe_reduce(r, t);
 }
 
-DEV void fe_sqr(fe *r, const fe *a) { fe_mul(r, a, a); }
+/* Dedicated Comba squaring: off-diagonal products are added twice, diagonals
+ * once -> 10 multiplies instead of 16 (vs a generic multiply). */
+DEV void fe_sqr(fe *r, const fe *a) {
+    u64 t[8];
+    u64 c0 = 0, c1 = 0, c2 = 0, hi, lo, cr;
+#define SQ_ACC(PH, PL) do { cr = 0; c0 = addc(c0, (PL), &cr); c1 = addc(c1, (PH), &cr); c2 += cr; } while (0)
+    lo = a->n[0] * a->n[0]; hi = MULHI(a->n[0], a->n[0]); SQ_ACC(hi, lo);
+    t[0] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[0] * a->n[1]; hi = MULHI(a->n[0], a->n[1]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    t[1] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[0] * a->n[2]; hi = MULHI(a->n[0], a->n[2]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    lo = a->n[1] * a->n[1]; hi = MULHI(a->n[1], a->n[1]); SQ_ACC(hi, lo);
+    t[2] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[0] * a->n[3]; hi = MULHI(a->n[0], a->n[3]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    lo = a->n[1] * a->n[2]; hi = MULHI(a->n[1], a->n[2]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    t[3] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[1] * a->n[3]; hi = MULHI(a->n[1], a->n[3]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    lo = a->n[2] * a->n[2]; hi = MULHI(a->n[2], a->n[2]); SQ_ACC(hi, lo);
+    t[4] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[2] * a->n[3]; hi = MULHI(a->n[2], a->n[3]); SQ_ACC(hi, lo); SQ_ACC(hi, lo);
+    t[5] = c0; c0 = c1; c1 = c2; c2 = 0;
+    lo = a->n[3] * a->n[3]; hi = MULHI(a->n[3], a->n[3]); SQ_ACC(hi, lo);
+    t[6] = c0; c0 = c1;
+    t[7] = c0;
+#undef SQ_ACC
+    fe_reduce(r, t);
+}
 
 /* r = a^(p-2) mod p (modular inverse), LSB-first square-and-multiply */
 DEV void fe_inv(fe *r, const fe *a) {
@@ -369,21 +406,16 @@ DEV void keccak_f1600(u64 st[25]) {
     }
 }
 
-/* keccak256 of a single block message (len <= 135) into out[0..31] */
+/* keccak256 of a single-block message (len <= 135) into out[0..31].
+ * Absorbs directly into the state words (no intermediate block buffer). */
 DEV void keccak256(const u8 *in, int len, u8 *out) {
-    u8 block[136];
-    for (int i = 0; i < 136; i++) block[i] = 0;
-    for (int i = 0; i < len; i++) block[i] = in[i];
-    block[len] ^= 0x01;
-    block[135] ^= 0x80;
-
     u64 st[25];
     for (int i = 0; i < 25; i++) st[i] = 0;
-    for (int i = 0; i < 17; i++) {
-        u64 w = 0;
-        for (int j = 0; j < 8; j++) w |= ((u64)block[i * 8 + j]) << (8 * j);
-        st[i] = w;
-    }
+    for (int i = 0; i < len; i++)
+        st[i >> 3] |= ((u64)in[i]) << (8 * (i & 7));
+    /* Keccak padding: 0x01 at byte len, 0x80 at byte 135 (rate-1). */
+    st[len >> 3] |= ((u64)0x01) << (8 * (len & 7));
+    st[16] |= ((u64)0x80) << 56;
     keccak_f1600(st);
     for (int i = 0; i < 4; i++) {
         u64 w = st[i];
@@ -398,8 +430,8 @@ DEV void keccak256(const u8 *in, int len, u8 *out) {
  *   q_base   : 64 bytes  (X||Y little-endian)
  * Produces the 20-byte contract deployment address for candidate k.
  */
-DEV void nick_address_for_k(
-    GLOBAL const u8 *d_table, const u8 *q_base, u64 k, u8 out_addr[20]) {
+/* Jacobian point Q_base + k*D via the comb table (no inverse). */
+DEV void nick_acc_for_k(GLOBAL const u8 *d_table, const u8 *q_base, u64 k, jac *out) {
     jac acc;
     fe_set_zero(&acc.X); fe_set_zero(&acc.Y); fe_set_zero(&acc.Z); /* infinity */
 
@@ -415,31 +447,124 @@ DEV void nick_address_for_k(
         fe_from_le32(buf + 32, &ty);
         point_add_mixed(&acc, &acc, &tx, &ty);
     }
-
-    /* + Q_base */
     fe qbx, qby;
     fe_from_le32(q_base, &qbx);
     fe_from_le32(q_base + 32, &qby);
     point_add_mixed(&acc, &acc, &qbx, &qby);
+    *out = acc;
+}
 
-    fe ax, ay;
-    jac_to_affine(&acc, &ax, &ay);
-
+/* Contract deployment address from an affine public key:
+ * sender = keccak256(X||Y)[12:]; addr = keccak256(rlp([sender,0]))[12:]. */
+DEV void affine_to_addr(const fe *ax, const fe *ay, u8 out_addr[20]) {
     u8 pub[64];
-    fe_to_be32(&ax, pub);
-    fe_to_be32(&ay, pub + 32);
+    fe_to_be32(ax, pub);
+    fe_to_be32(ay, pub + 32);
 
     u8 h[32];
-    keccak256(pub, 64, h);          /* sender = h[12:32] */
+    keccak256(pub, 64, h);
 
     u8 rlp[23];
-    rlp[0] = 0xd6; rlp[1] = 0x94;
+    rlp[0] = 0xd6;
+    rlp[1] = 0x94;
     for (int i = 0; i < 20; i++) rlp[2 + i] = h[12 + i];
     rlp[22] = 0x80;
 
     u8 h2[32];
-    keccak256(rlp, 23, h2);         /* contract addr = h2[12:32] */
+    keccak256(rlp, 23, h2);
     for (int i = 0; i < 20; i++) out_addr[i] = h2[12 + i];
+}
+
+DEV int nick_match(const u8 *addr, const u8 *prefix, int prefix_len,
+                   const u8 *suffix, int suffix_len);
+
+#if NICK_ITERS > 256
+#error "NICK_ITERS must be <= 256 (uses comb-table window 0 for i*D)"
+#endif
+
+/*
+ * Process NICK_ITERS consecutive candidates [base_nonce, base_nonce+NICK_ITERS)
+ * entirely in AFFINE coordinates.
+ *
+ * P_i = P0 + i*D, and i*D is exactly comb-table entry table[0][i]. So compute P0
+ * affine once, form the deltas (i*D).x - P0.x for all i, batch-invert them with a
+ * single field inversion (Montgomery's trick), and obtain each P_i with one
+ * affine point addition (1 sqr + 3 mul) — already in affine form for hashing.
+ */
+DEV void nick_mine_run(
+    GLOBAL const u8 *d_table, const u8 *q_base, u64 base_nonce,
+    const u8 *prefix, int prefix_len, const u8 *suffix, int suffix_len,
+    GLOBAL u8 *result_address, GLOBAL u64 *result_nonce, GLOBAL volatile int *found) {
+
+    /* P0 = Q_base + base*D, converted to affine (the run's only point inverse). */
+    jac P0j;
+    nick_acc_for_k(d_table, q_base, base_nonce, &P0j);
+    fe px, py;
+    jac_to_affine(&P0j, &px, &py);
+
+    const int m = NICK_ITERS - 1;
+    /* Single per-thread array: prefix products. The deltas (i*D).x - px are
+     * recomputed (cheap table reads) in the backward pass, halving local mem. */
+    fe pref[NICK_ITERS];
+    u8 buf[64];
+
+    /* forward: pref[j] = prod of delta_0..delta_{j-1}; delta_j = table[0][j+1].x - px */
+    fe acc;
+    fe_set_one(&acc);
+    for (int j = 0; j < m; j++) {
+        GLOBAL const u8 *e = d_table + ((j + 1) * 64); /* table[0][j+1] */
+        for (int b = 0; b < 32; b++) buf[b] = e[b];    /* x only */
+        fe mx, delta;
+        fe_from_le32(buf, &mx);
+        fe_sub(&delta, &mx, &px);
+        pref[j] = acc;
+        fe_mul(&acc, &acc, &delta);
+    }
+    fe inv;
+    fe_inv(&inv, &acc); /* the run's single field inversion */
+
+    /* candidate 0 = P0 */
+    {
+        u8 addr[20];
+        affine_to_addr(&px, &py, addr);
+        if (nick_match(addr, prefix, prefix_len, suffix, suffix_len)) {
+            if (ATOMIC_CAS(found, 0, 1) == 0) {
+                for (int b = 0; b < 20; b++) result_address[b] = addr[b];
+                *result_nonce = base_nonce;
+            }
+        }
+    }
+
+    /* candidates N-1..1: recompute delta, peel inverse, one affine add each */
+    for (int j = m - 1; j >= 0; j--) {
+        GLOBAL const u8 *e = d_table + ((j + 1) * 64);
+        for (int b = 0; b < 64; b++) buf[b] = e[b];
+        fe mx, my, delta, invj;
+        fe_from_le32(buf, &mx);
+        fe_from_le32(buf + 32, &my);
+        fe_sub(&delta, &mx, &px);
+        fe_mul(&invj, &inv, &pref[j]); /* 1/delta_j */
+        fe_mul(&inv, &inv, &delta);    /* peel off delta_j */
+
+        fe lam, tt, xi, yi;
+        fe_sub(&tt, &my, &py);
+        fe_mul(&lam, &tt, &invj); /* λ = (my-py)/(mx-px) */
+        fe_sqr(&tt, &lam);
+        fe_sub(&xi, &tt, &px);
+        fe_sub(&xi, &xi, &mx);    /* xi = λ² - px - mx */
+        fe_sub(&tt, &px, &xi);
+        fe_mul(&yi, &lam, &tt);
+        fe_sub(&yi, &yi, &py);    /* yi = λ(px-xi) - py */
+
+        u8 addr[20];
+        affine_to_addr(&xi, &yi, addr);
+        if (nick_match(addr, prefix, prefix_len, suffix, suffix_len)) {
+            if (ATOMIC_CAS(found, 0, 1) == 0) {
+                for (int b = 0; b < 20; b++) result_address[b] = addr[b];
+                *result_nonce = base_nonce + (u64)(j + 1);
+            }
+        }
+    }
 }
 
 /* Returns 1 if addr matches prefix (first prefix_len bytes) AND suffix
