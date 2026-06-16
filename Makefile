@@ -75,21 +75,20 @@ clean:
 	rm -f miner/kernel/*.o miner/kernel/*.a
 
 # ---------------------------------------------------------------------------
-# EIP-8282 builder predeploy init code (assembled from the sys-asm submodule)
+# Contract init code (assembled from the sys-asm submodule)
 #
-# The deposit/exit contracts are geas assembly in the `sys-asm` submodule.
+# The predeploy contracts are geas assembly in the `sys-asm` submodule.
 # Assembling ctor.eas yields `ctor ++ runtime` = the deployment init code,
 # whose bytes determine the vanity address. These targets emit it 0x-prefixed,
 # ready for `./nick search --initcode`.
 #
-# REF selects the sys-asm commit/branch (a SHA is used from the local clone;
-# a branch is fetched at runtime). Default = EIP-8282 PR #43's head, since the
-# builder contracts are not on sys-asm `main` yet.
+# REF selects the sys-asm revision (a SHA is used from the local clone; a
+# branch is fetched at runtime). Default = the pinned commit below.
 #   make initcode-deposit              # pinned default (offline)
 #   make initcode-deposit REF=<sha>    # any commit
-#   make initcode-deposit REF=add-8282 # latest PR branch tip (fetches)
-# TODO: once PR #43 merges, set SYS_ASM_REMOTE=https://github.com/ethereum/sys-asm.git
-#       and REF=main to track upstream main.
+#   make initcode-deposit REF=<branch> # latest branch tip (fetches)
+# TODO: when the contracts land on sys-asm main, point
+#       SYS_ASM_REMOTE=https://github.com/ethereum/sys-asm.git and REF=main.
 # ---------------------------------------------------------------------------
 GEAS           ?= $(shell command -v geas 2>/dev/null || echo "$$(go env GOPATH)/bin/geas")
 SYS_ASM_DIR    ?= sys-asm
@@ -101,7 +100,7 @@ EXIT_CTOR      := $(SYS_ASM_DIR)/src/builder_exits/ctor.eas
 # Vanity search parameters (override on the command line). The target address
 # is 0x0000-leading with a 00<eip> suffix; sig-r spells the EIP number too.
 # EIP has no default -- set it, or pass SUFFIX/SIG_R explicitly.
-#   make mine-deposit EIP=8282           # suffix 0x008282, sig-r 0x8282
+#   make mine-deposit EIP=<num>                    # suffix 0x00<num>, sig-r 0x<num>
 #   make mine-deposit SUFFIX=0xdead SIG_R=0xdead   # override directly
 EIP         ?=
 PREFIX      ?= 0x0000
@@ -146,7 +145,7 @@ initcode: .sys-asm-ref
 mine-deposit: .sys-asm-ref
 	@test -n "$(SUFFIX)" -a -n "$(SIG_R)" || { \
 		echo "ERROR: which EIP do you want to mine for? Set EIP=<num>, e.g.:"; \
-		echo "         make mine-deposit EIP=8282"; \
+		echo "         make mine-deposit EIP=<num>"; \
 		echo "       (or override SUFFIX=0x... SIG_R=0x... directly)"; exit 1; }
 	@test -x ./$(BINARY_NAME) || { echo "ERROR: ./$(BINARY_NAME) not built; run: make build-cuda"; exit 1; }
 	./$(BINARY_NAME) search --gpu --gpu-backend $(GPU_BACKEND) --gpu-devices $(GPU_DEVICES) \
