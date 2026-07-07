@@ -116,6 +116,7 @@ GPU_BACKEND ?= cuda
 GPU_DEVICES ?= all
 BATCH       ?= 67108864
 START_NONCE ?=
+RUNS_DIR    ?= runs
 
 # Ensure the sys-asm submodule is present, checked out at $(REF), and that geas
 # is available. Run as a prerequisite of the init code / mining targets.
@@ -154,10 +155,15 @@ mine-deposit: .sys-asm-ref
 		echo "         make mine-deposit EIP=<num>"; \
 		echo "       (or override SUFFIX=0x... SIG_R=0x... directly)"; exit 1; }
 	@test -x ./$(BINARY_NAME) || { echo "ERROR: ./$(BINARY_NAME) not built; run: make build-cuda"; exit 1; }
+	@mkdir -p $(RUNS_DIR)
+	@ts=$$(date +%Y-%m-%d_%H%M); log=$(RUNS_DIR)/mine-deposit-$$ts.log; res=$(RUNS_DIR)/mine-deposit-$$ts.result.txt; \
+	echo "logging to $$log"; \
 	./$(BINARY_NAME) search --gpu --gpu-backend $(GPU_BACKEND) --gpu-devices $(GPU_DEVICES) \
 		--batch-size $(BATCH) --initcode 0x$$($(GEAS) $(DEPOSIT_CTOR)) \
 		--prefix $(PREFIX) --suffix $(SUFFIX) --sig-r $(SIG_R) --score $(SCORE) \
-		$(if $(START_NONCE),--start-nonce $(START_NONCE))
+		$(if $(START_NONCE),--start-nonce $(START_NONCE)) 2>&1 | tee $$log; \
+	awk '/^Found!/{f=1} f{print}' $$log > $$res; \
+	echo "result saved: $$res"
 
 ## help: Show this help
 help:
