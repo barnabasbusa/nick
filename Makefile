@@ -102,6 +102,11 @@ EXIT_CTOR      := $(SYS_ASM_DIR)/src/builder_exits/ctor.eas
 # EIP has no default -- set it, or pass SUFFIX/SIG_R explicitly.
 #   make mine-deposit EIP=<num>                    # suffix 0x00<num>, sig-r 0x<num>
 #   make mine-deposit SUFFIX=0xdead SIG_R=0xdead   # override directly
+#
+# The GPU search picks a random start offset by default, so each run scans a
+# fresh range. Set START_NONCE to pin the offset for a reproducible search
+# (requires a miner with --start-nonce support):
+#   make mine-deposit EIP=<num> START_NONCE=<n>
 EIP         ?=
 PREFIX      ?= 0x0000
 SUFFIX      ?= $(if $(EIP),0x00$(EIP))
@@ -110,6 +115,7 @@ SCORE       ?= 10
 GPU_BACKEND ?= cuda
 GPU_DEVICES ?= all
 BATCH       ?= 67108864
+START_NONCE ?=
 
 # Ensure the sys-asm submodule is present, checked out at $(REF), and that geas
 # is available. Run as a prerequisite of the init code / mining targets.
@@ -150,7 +156,8 @@ mine-deposit: .sys-asm-ref
 	@test -x ./$(BINARY_NAME) || { echo "ERROR: ./$(BINARY_NAME) not built; run: make build-cuda"; exit 1; }
 	./$(BINARY_NAME) search --gpu --gpu-backend $(GPU_BACKEND) --gpu-devices $(GPU_DEVICES) \
 		--batch-size $(BATCH) --initcode 0x$$($(GEAS) $(DEPOSIT_CTOR)) \
-		--prefix $(PREFIX) --suffix $(SUFFIX) --sig-r $(SIG_R) --score $(SCORE)
+		--prefix $(PREFIX) --suffix $(SUFFIX) --sig-r $(SIG_R) --score $(SCORE) \
+		$(if $(START_NONCE),--start-nonce $(START_NONCE))
 
 ## help: Show this help
 help:
